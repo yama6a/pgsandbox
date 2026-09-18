@@ -27,6 +27,10 @@ func TestStartServer(t *testing.T) {
 	require.NoError(t, first.admin.QueryRow(t.Context(), "show fsync").Scan(&fsync))
 	assert.Equal(t, "off", fsync)
 
+	var maxConns string
+	require.NoError(t, first.admin.QueryRow(t.Context(), "show max_connections").Scan(&maxConns))
+	assert.Equal(t, "1000", maxConns)
+
 	//nolint:gosec // fixed argument list, name comes from the code under test
 	out, err := exec.CommandContext(t.Context(), "docker", "inspect", first.name,
 		"--format", "{{.State.Running}} {{.Config.Image}} {{index .HostConfig.Tmpfs \"/var/lib/postgresql\"}}").Output()
