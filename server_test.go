@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const longID = "c561ce51d0d3801241b9476e875ff503f128f6800b147f94ab985670054c0532"
+
 func TestStartServer(t *testing.T) {
 	t.Parallel()
 
@@ -40,29 +42,167 @@ func TestStartServer(t *testing.T) {
 	assert.Equal(t, "true postgres:18-alpine rw\n", string(out))
 }
 
-func TestEndpoint(t *testing.T) {
+func TestReachRemoteDaemon(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name        string
-		dockerHost  string
-		inContainer bool
-		wantHost    string
-		wantPort    string
+		name       string
+		dockerHost string
+		wantHost   string
 	}{
-		{name: "local daemon", wantHost: "127.0.0.1", wantPort: "32768"},
-		{name: "unix socket", dockerHost: "unix:///var/run/docker.sock", wantHost: "127.0.0.1", wantPort: "32768"},
-		{name: "named pipe", dockerHost: "npipe:////./pipe/docker", wantHost: "127.0.0.1", wantPort: "32768"},
-		{name: "tcp daemon", dockerHost: "tcp://10.0.0.7:2375", wantHost: "10.0.0.7", wantPort: "32768"},
-		{name: "ssh daemon", dockerHost: "ssh://core@build-box", wantHost: "build-box", wantPort: "32768"},
-		{name: "inside a container", inContainer: true, wantHost: "172.17.0.7", wantPort: "5432"},
-		{name: "inside a container, remote daemon", inContainer: true, dockerHost: "tcp://10.0.0.7:2375", wantHost: "10.0.0.7", wantPort: "32768"},
+		{name: "tcp daemon", dockerHost: "tcp://10.0.0.7:2375", wantHost: "10.0.0.7"},
+		{name: "ssh daemon", dockerHost: "ssh://core@build-box", wantHost: "build-box"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			host, port := endpoint(tc.dockerHost, tc.inContainer, "172.17.0.7", "32768")
+			var sandbox containerInfo
+			require.NoError(t, json.Unmarshal([]byte(`{"NetworkSettings":{"Ports":{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"32773"}]}}}`), &sandbox))
+
+			host, port, err := reach(t.Context(), tc.dockerHost, "pgsandbox-18", &sandbox)
+			require.NoError(t, err)
 			assert.Equal(t, tc.wantHost, host)
-			assert.Equal(t, tc.wantPort, port)
+			assert.Equal(t, "32773", port)
+		})
+	}
+}
+
+func TestReachLocalDaemon(t *testing.T) {
+	t.Parallel()
+	cases := []string{"", "unix:///var/run/docker.sock", "npipe:////./pipe/docker"}
+	for _, dockerHost := range cases {
+		t.Run(dockerHost, func(t *testing.T) {
+			t.Parallel()
+			if inContainer() {
+				t.Skip("the loopback path only applies on the host")
+			}
+			var sandbox containerInfo
+			require.NoError(t, json.Unmarshal([]byte(`{"NetworkSettings":{"Ports":{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"32773"}]}}}`), &sandbox))
+
+			host, port, err := reach(t.Context(), dockerHost, "pgsandbox-18", &sandbox)
+			require.NoError(t, err)
+			assert.Equal(t, "127.0.0.1", host)
+			assert.Equal(t, "32773", port)
+		})
+	}
+}
+
+func TestSharedIP(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		self    string
+		sandbox string
+		want    string
+	}{
+		{
+			name:    "same bridge",
+			self:    `{"NetworkSettings":{"Networks":{"bridge":{"NetworkID":"a","IPAddress":"172.17.0.8"}}}}`,
+			sandbox: `{"NetworkSettings":{"Networks":{"bridge":{"NetworkID":"a","IPAddress":"172.17.0.4"}}}}`,
+			want:    "172.17.0.4",
+		},
+		{
+			name:    "shared user-defined network among several",
+			self:    `{"NetworkSettings":{"Networks":{"bridge":{"NetworkID":"a","IPAddress":"172.17.0.8"},"ci":{"NetworkID":"c","IPAddress":"10.89.0.2"}}}}`,
+			sandbox: `{"NetworkSettings":{"Networks":{"ci":{"NetworkID":"c","IPAddress":"10.89.0.3"}}}}`,
+			want:    "10.89.0.3",
+		},
+		{
+			name:    "no network in common",
+			self:    `{"NetworkSettings":{"Networks":{"ci":{"NetworkID":"c","IPAddress":"10.89.0.2"}}}}`,
+			sandbox: `{"NetworkSettings":{"Networks":{"bridge":{"NetworkID":"a","IPAddress":"172.17.0.4"}}}}`,
+			want:    "",
+		},
+		{
+			name:    "same name on two daemons is not the same network",
+			self:    `{"NetworkSettings":{"Networks":{"bridge":{"NetworkID":"a","IPAddress":"172.17.0.8"}}}}`,
+			sandbox: `{"NetworkSettings":{"Networks":{"bridge":{"NetworkID":"b","IPAddress":"172.17.0.4"}}}}`,
+			want:    "",
+		},
+		{
+			name:    "both on the host stack",
+			self:    `{"NetworkSettings":{"Networks":{"host":{"NetworkID":"h","IPAddress":""}}}}`,
+			sandbox: `{"NetworkSettings":{"Networks":{"host":{"NetworkID":"h","IPAddress":""}}}}`,
+			want:    "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var self, sandbox containerInfo
+			require.NoError(t, json.Unmarshal([]byte(tc.self), &self))
+			require.NoError(t, json.Unmarshal([]byte(tc.sandbox), &sandbox))
+			assert.Equal(t, tc.want, sharedIP(&self, &sandbox))
+		})
+	}
+}
+
+func TestAttachableNetworks(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		doc  string
+		want []string
+	}{
+		{
+			name: "bridge and a user-defined network, sorted",
+			doc:  `{"NetworkSettings":{"Networks":{"zz":{"IPAddress":"10.89.0.2"},"bridge":{"IPAddress":"172.17.0.8"}}}}`,
+			want: []string{"bridge", "zz"},
+		},
+		{name: "host stack", doc: `{"NetworkSettings":{"Networks":{"host":{"IPAddress":""}}}}`},
+		{name: "no networking", doc: `{"NetworkSettings":{"Networks":{"none":{"IPAddress":""}}}}`},
+		{name: "nothing reported", doc: `{}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var info containerInfo
+			require.NoError(t, json.Unmarshal([]byte(tc.doc), &info))
+			assert.Equal(t, tc.want, info.attachableNetworks())
+		})
+	}
+}
+
+func TestUsesHostNetwork(t *testing.T) {
+	t.Parallel()
+
+	var host, bridge containerInfo
+	require.NoError(t, json.Unmarshal([]byte(`{"NetworkSettings":{"Networks":{"host":{}}}}`), &host))
+	require.NoError(t, json.Unmarshal([]byte(`{"NetworkSettings":{"Networks":{"bridge":{}}}}`), &bridge))
+
+	assert.True(t, host.usesHostNetwork())
+	assert.False(t, bridge.usesHostNetwork())
+}
+
+func TestContainerIDs(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		mountinfo string
+		want      []string
+	}{
+		{
+			name:      "docker bind mounts",
+			mountinfo: "411 388 253:17 /var/lib/docker/containers/" + longID + "/resolv.conf /etc/resolv.conf rw" + "\n" + "412 388 253:17 /var/lib/docker/containers/" + longID + "/hosts /etc/hosts rw",
+			want:      []string{longID},
+		},
+		{
+			name:      "podman bind mounts",
+			mountinfo: "500 400 0:50 /overlay-containers/" + longID + "/userdata/resolv.conf /etc/resolv.conf rw",
+			want:      []string{longID},
+		},
+		{
+			name:      "no container mounts",
+			mountinfo: "25 30 253:1 / /etc/hosts rw,relatime - ext4 /dev/sda1 rw",
+		},
+		{
+			name:      "layer hashes are not ids",
+			mountinfo: "30 25 0:40 / / rw - overlay rw,upperdir=/var/lib/docker/overlay2/" + longID + "/diff",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, containerIDs(tc.mountinfo))
 		})
 	}
 }
