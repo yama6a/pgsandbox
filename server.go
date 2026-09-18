@@ -3,12 +3,15 @@ package pgsandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +23,8 @@ const (
 	serverUser   = "sandbox"
 	serverPass   = "sandbox"
 	adminDB      = "postgres"
+	pgPort       = "5432"
+	pgPortKey    = pgPort + "/tcp"
 	startTimeout = 90 * time.Second
 	pollInterval = 100 * time.Millisecond
 )
@@ -76,15 +81,17 @@ func launch(ctx context.Context, major int) (*server, error) {
 		return nil, err
 	}
 
-	addr, err := docker(ctx, "inspect", name, "--format",
-		`{{.NetworkSettings.IPAddress}} {{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}`)
+	info, err := inspect(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("address of %s: %w", name, err)
 	}
-	containerIP, hostPort, _ := strings.Cut(addr, " ")
+	hostPort := info.hostPort()
+	if hostPort == "" {
+		return nil, fmt.Errorf("address of %s: no host binding for %s", name, pgPortKey)
+	}
 
 	_, inContainer := os.Stat("/.dockerenv")
-	host, port := endpoint(os.Getenv("DOCKER_HOST"), inContainer == nil, containerIP, hostPort)
+	host, port := endpoint(os.Getenv("DOCKER_HOST"), inContainer == nil, info.ip(), hostPort)
 
 	s := &server{name: name, host: host, port: port}
 	s.admin, err = waitForPostgres(ctx, s.dsn(adminDB))
@@ -98,9 +105,9 @@ func launch(ctx context.Context, major int) (*server, error) {
 // may race to create it; the loser sees a name conflict and comes back around to attach.
 func ensureRunning(ctx context.Context, name, image string) error {
 	for {
-		running, err := docker(ctx, "inspect", name, "--format", "{{.State.Running}}")
+		info, err := inspect(ctx, name)
 		switch {
-		case err == nil && running == "true":
+		case err == nil && info.State.Running:
 			return nil
 		case err == nil:
 			if _, err := docker(ctx, "start", name); err != nil {
@@ -113,7 +120,7 @@ func ensureRunning(ctx context.Context, name, image string) error {
 			"--env", "POSTGRES_USER="+serverUser,
 			"--env", "POSTGRES_PASSWORD="+serverPass,
 			"--env", "POSTGRES_DB="+adminDB,
-			"--publish", "127.0.0.1::5432",
+			"--publish", "127.0.0.1::"+pgPort,
 			"--tmpfs", "/var/lib/postgresql:rw",
 			image,
 			"-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off",
@@ -156,6 +163,79 @@ func waitForPostgres(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	}
 }
 
+// containerInfo is the part of `docker inspect` output this package reads.
+//
+//nolint:tagliatelle // the daemon's field names, not ours
+type containerInfo struct {
+	State struct {
+		Running bool `json:"Running"`
+	} `json:"State"`
+	NetworkSettings struct {
+		IPAddress string `json:"IPAddress"`
+		Ports     map[string][]struct {
+			HostIP   string `json:"HostIp"`
+			HostPort string `json:"HostPort"`
+		} `json:"Ports"`
+		Networks map[string]struct {
+			IPAddress string `json:"IPAddress"`
+		} `json:"Networks"`
+	} `json:"NetworkSettings"`
+}
+
+// inspect reads the whole JSON document rather than asking for `--format`, because the docker
+// CLI runs format templates with missingkey=error and Engine 28 dropped the top-level
+// NetworkSettings.IPAddress, so a template naming a field that a given daemon omits fails the
+// whole call instead of yielding an empty string.
+func inspect(ctx context.Context, name string) (*containerInfo, error) {
+	out, err := docker(ctx, "inspect", "--type", "container", name)
+	if err != nil {
+		return nil, err
+	}
+
+	var infos []containerInfo
+	if err := json.Unmarshal([]byte(out), &infos); err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
+	}
+	if len(infos) == 0 {
+		return nil, fmt.Errorf("inspect %s: empty response", name)
+	}
+	return &infos[0], nil
+}
+
+// ip is the container's own address on the docker network, or "" when the daemon reports none.
+// Engine 28 and newer report it per network and may omit the top-level copy entirely.
+func (c *containerInfo) ip() string {
+	if c.NetworkSettings.IPAddress != "" {
+		return c.NetworkSettings.IPAddress
+	}
+	if n, ok := c.NetworkSettings.Networks["bridge"]; ok && n.IPAddress != "" {
+		return n.IPAddress
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.NetworkSettings.Networks)) {
+		if ip := c.NetworkSettings.Networks[name].IPAddress; ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+// hostPort is the published port on the daemon's host. A daemon with IPv6 enabled publishes one
+// binding per family, and only the IPv4 one is reachable over the loopback address used here.
+func (c *containerInfo) hostPort() string {
+	bindings := c.NetworkSettings.Ports[pgPortKey]
+	for _, b := range bindings {
+		if b.HostPort != "" && !strings.Contains(b.HostIP, ":") {
+			return b.HostPort
+		}
+	}
+	for _, b := range bindings {
+		if b.HostPort != "" {
+			return b.HostPort
+		}
+	}
+	return ""
+}
+
 func docker(ctx context.Context, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -176,7 +256,7 @@ func endpoint(dockerHost string, inContainer bool, containerIP, hostPort string)
 		return h, hostPort
 	}
 	if inContainer && containerIP != "" {
-		return containerIP, "5432"
+		return containerIP, pgPort
 	}
 	return "127.0.0.1", hostPort
 }

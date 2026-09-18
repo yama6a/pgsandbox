@@ -1,6 +1,8 @@
 package pgsandbox
 
 import (
+	"encoding/json"
+	"os"
 	"os/exec"
 	"testing"
 
@@ -69,4 +71,94 @@ func TestLaunchWithoutDocker(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	_, err := launch(t.Context(), 99)
 	require.ErrorIs(t, err, errNoDocker)
+}
+
+func TestContainerInfoFromRealInspect(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile("testdata/inspect-engine27.json")
+	require.NoError(t, err)
+
+	var infos []containerInfo
+	require.NoError(t, json.Unmarshal(raw, &infos))
+	require.Len(t, infos, 1)
+
+	assert.True(t, infos[0].State.Running)
+	assert.Equal(t, "172.17.0.4", infos[0].ip())
+	assert.Equal(t, "32773", infos[0].hostPort())
+}
+
+func TestContainerInfoAddress(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		doc      string
+		wantIP   string
+		wantPort string
+	}{
+		{
+			name:     "engine 27 publishes the address twice",
+			doc:      `{"NetworkSettings":{"IPAddress":"172.17.0.4","Ports":{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"32773"}]},"Networks":{"bridge":{"IPAddress":"172.17.0.4"}}}}`,
+			wantIP:   "172.17.0.4",
+			wantPort: "32773",
+		},
+		{
+			name:     "engine 28 drops the top-level address",
+			doc:      `{"NetworkSettings":{"Ports":{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"32773"}]},"Networks":{"bridge":{"IPAddress":"172.17.0.4"}}}}`,
+			wantIP:   "172.17.0.4",
+			wantPort: "32773",
+		},
+		{
+			name:     "only a user-defined network",
+			doc:      `{"NetworkSettings":{"Ports":{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"32773"}]},"Networks":{"ci-net":{"IPAddress":"10.89.0.3"}}}}`,
+			wantIP:   "10.89.0.3",
+			wantPort: "32773",
+		},
+		{
+			name:     "no address anywhere",
+			doc:      `{"NetworkSettings":{"Ports":{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"32773"}]},"Networks":{"bridge":{"IPAddress":""}}}}`,
+			wantIP:   "",
+			wantPort: "32773",
+		},
+		{
+			name:     "dual-stack binding prefers IPv4",
+			doc:      `{"NetworkSettings":{"Ports":{"5432/tcp":[{"HostIp":"::","HostPort":"32789"},{"HostIp":"0.0.0.0","HostPort":"32789"}]}}}`,
+			wantIP:   "",
+			wantPort: "32789",
+		},
+		{
+			name:     "IPv6 binding only",
+			doc:      `{"NetworkSettings":{"Ports":{"5432/tcp":[{"HostIp":"::","HostPort":"32789"}]}}}`,
+			wantIP:   "",
+			wantPort: "32789",
+		},
+		{
+			name:     "nothing published",
+			doc:      `{"NetworkSettings":{"IPAddress":"172.17.0.4","Ports":{}}}`,
+			wantIP:   "172.17.0.4",
+			wantPort: "",
+		},
+		{
+			name:     "no network settings at all",
+			doc:      `{}`,
+			wantIP:   "",
+			wantPort: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var info containerInfo
+			require.NoError(t, json.Unmarshal([]byte(tc.doc), &info))
+			assert.Equal(t, tc.wantIP, info.ip())
+			assert.Equal(t, tc.wantPort, info.hostPort())
+		})
+	}
+}
+
+func TestInspectMissingContainer(t *testing.T) {
+	t.Parallel()
+
+	_, err := inspect(t.Context(), "pgsandbox-does-not-exist")
+	require.Error(t, err)
 }
