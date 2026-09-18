@@ -21,12 +21,5 @@
     },
   ],
 
-  packageRules: [
-    {
-      description: "keep testcontainers majors together (modules must match the core module version)",
-      matchPackageNames: ["github.com/testcontainers/testcontainers-go{,/**}"],
-      matchUpdateTypes: ["major"],
-      groupName: "testcontainers (major)",
-    },
-  ],
+  packageRules: [],
 }
