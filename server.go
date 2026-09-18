@@ -117,6 +117,9 @@ func ensureRunning(ctx context.Context, name, image string) error {
 			"--tmpfs", "/var/lib/postgresql:rw",
 			image,
 			"-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off",
+			// Every test process shares this server, and go test runs NumCPU packages, each with
+			// NumCPU parallel tests, each holding a small pool. The default 100 runs out fast.
+			"-c", "max_connections=1000",
 		)
 		if err == nil {
 			return nil
