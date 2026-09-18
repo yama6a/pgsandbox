@@ -1,0 +1,18 @@
+name: Release
+
+# A merged PR is itself a push to main. Every merge is a release; the bump comes from the
+# release:major / release:minor labels on the PR, patch otherwise.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  go-release:
+    uses: yama6a/gha/.github/workflows/go-release.yaml@v2

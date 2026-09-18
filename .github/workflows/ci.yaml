@@ -1,0 +1,25 @@
+name: Go PR CI
+
+# A push to main runs the same checks again so the caches they write are restorable by
+# every later PR; a cache written on a PR is not.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    uses: yama6a/gha/.github/workflows/go-ci.yaml@v2
+
+  renovate-config:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: yama6a/gha/.github/actions/validate-renovate-config@v2

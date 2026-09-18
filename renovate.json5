@@ -1,0 +1,32 @@
+{
+  // The shared presets carry the grouping, automerge and digest-pinning rules. Only what is
+  // specific to this repo lives below. Every automerged bump is a merge to main, which cuts a
+  // patch release through release.yaml.
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "github>yama6a/gha:default.json5",
+    "github>yama6a/gha:go.json5",
+  ],
+
+  // No built-in manager reads a Go const, so the Postgres major the tests start would rot unnoticed.
+  customManagers: [
+    {
+      customType: "regex",
+      description: "the Postgres major the tests start",
+      managerFilePatterns: ["pgsandbox_test.go"],
+      matchStrings: ["testMajor\\s+= (?<currentValue>\\d+)"],
+      depNameTemplate: "postgres",
+      datasourceTemplate: "docker",
+      versioningTemplate: "docker",
+    },
+  ],
+
+  packageRules: [
+    {
+      description: "keep testcontainers majors together (modules must match the core module version)",
+      matchPackageNames: ["github.com/testcontainers/testcontainers-go{,/**}"],
+      matchUpdateTypes: ["major"],
+      groupName: "testcontainers (major)",
+    },
+  ],
+}
