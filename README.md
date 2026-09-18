@@ -29,6 +29,11 @@ Tests can run in parallel; each one sees only its own rows.
   is reached on `127.0.0.1`, or on the host named by a `tcp://` or `ssh://` `DOCKER_HOST`.
 - Go 1.27
 
+Tests that themselves run in a container (CI sandboxes, devcontainers) cannot see the host
+loopback the port is published on, so `New` talks to the sandbox container directly instead. It
+needs the daemon's socket mounted, and it attaches the sandbox to one of the calling container's
+networks when the two share none. That attachment outlives the run, like the container itself.
+
 ## API
 
 ```go

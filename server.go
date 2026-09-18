@@ -3,12 +3,16 @@ package pgsandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +24,8 @@ const (
 	serverUser   = "sandbox"
 	serverPass   = "sandbox"
 	adminDB      = "postgres"
+	pgPort       = "5432"
+	pgPortKey    = pgPort + "/tcp"
 	startTimeout = 90 * time.Second
 	pollInterval = 100 * time.Millisecond
 )
@@ -76,15 +82,14 @@ func launch(ctx context.Context, major int) (*server, error) {
 		return nil, err
 	}
 
-	addr, err := docker(ctx, "inspect", name, "--format",
-		`{{.NetworkSettings.IPAddress}} {{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}`)
+	info, err := inspect(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("address of %s: %w", name, err)
 	}
-	containerIP, hostPort, _ := strings.Cut(addr, " ")
-
-	_, inContainer := os.Stat("/.dockerenv")
-	host, port := endpoint(os.Getenv("DOCKER_HOST"), inContainer == nil, containerIP, hostPort)
+	host, port, err := reach(ctx, os.Getenv("DOCKER_HOST"), name, info)
+	if err != nil {
+		return nil, fmt.Errorf("address of %s: %w", name, err)
+	}
 
 	s := &server{name: name, host: host, port: port}
 	s.admin, err = waitForPostgres(ctx, s.dsn(adminDB))
@@ -98,9 +103,9 @@ func launch(ctx context.Context, major int) (*server, error) {
 // may race to create it; the loser sees a name conflict and comes back around to attach.
 func ensureRunning(ctx context.Context, name, image string) error {
 	for {
-		running, err := docker(ctx, "inspect", name, "--format", "{{.State.Running}}")
+		info, err := inspect(ctx, name)
 		switch {
-		case err == nil && running == "true":
+		case err == nil && info.State.Running:
 			return nil
 		case err == nil:
 			if _, err := docker(ctx, "start", name); err != nil {
@@ -113,7 +118,7 @@ func ensureRunning(ctx context.Context, name, image string) error {
 			"--env", "POSTGRES_USER="+serverUser,
 			"--env", "POSTGRES_PASSWORD="+serverPass,
 			"--env", "POSTGRES_DB="+adminDB,
-			"--publish", "127.0.0.1::5432",
+			"--publish", "127.0.0.1::"+pgPort,
 			"--tmpfs", "/var/lib/postgresql:rw",
 			image,
 			"-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off",
@@ -156,6 +161,100 @@ func waitForPostgres(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	}
 }
 
+// containerInfo is the part of `docker inspect` output this package reads.
+//
+//nolint:tagliatelle // the daemon's field names, not ours
+type containerInfo struct {
+	State struct {
+		Running bool `json:"Running"`
+	} `json:"State"`
+	NetworkSettings struct {
+		IPAddress string `json:"IPAddress"`
+		Ports     map[string][]struct {
+			HostIP   string `json:"HostIp"`
+			HostPort string `json:"HostPort"`
+		} `json:"Ports"`
+		Networks map[string]struct {
+			NetworkID string `json:"NetworkID"`
+			IPAddress string `json:"IPAddress"`
+		} `json:"Networks"`
+	} `json:"NetworkSettings"`
+}
+
+// inspect reads the whole JSON document rather than asking for `--format`, because the docker
+// CLI runs format templates with missingkey=error and Engine 28 dropped the top-level
+// NetworkSettings.IPAddress, so a template naming a field that a given daemon omits fails the
+// whole call instead of yielding an empty string.
+func inspect(ctx context.Context, name string) (*containerInfo, error) {
+	out, err := docker(ctx, "inspect", "--type", "container", name)
+	if err != nil {
+		return nil, err
+	}
+
+	var infos []containerInfo
+	if err := json.Unmarshal([]byte(out), &infos); err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
+	}
+	if len(infos) == 0 {
+		return nil, fmt.Errorf("inspect %s: empty response", name)
+	}
+	return &infos[0], nil
+}
+
+// ip is the container's own address on the docker network, or "" when the daemon reports none.
+// Engine 28 and newer report it per network and may omit the top-level copy entirely.
+func (c *containerInfo) ip() string {
+	if c.NetworkSettings.IPAddress != "" {
+		return c.NetworkSettings.IPAddress
+	}
+	if n, ok := c.NetworkSettings.Networks["bridge"]; ok && n.IPAddress != "" {
+		return n.IPAddress
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.NetworkSettings.Networks)) {
+		if ip := c.NetworkSettings.Networks[name].IPAddress; ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+// usesHostNetwork reports whether the container shares the host's network stack, which puts the
+// sandbox's published port on its own loopback.
+func (c *containerInfo) usesHostNetwork() bool {
+	_, ok := c.NetworkSettings.Networks["host"]
+	return ok
+}
+
+// attachableNetworks are the networks another container can be connected to in order to reach
+// this one. The host and none drivers carry no address and cannot be joined.
+func (c *containerInfo) attachableNetworks() []string {
+	var networks []string
+	for _, name := range slices.Sorted(maps.Keys(c.NetworkSettings.Networks)) {
+		if name == "host" || name == "none" || c.NetworkSettings.Networks[name].IPAddress == "" {
+			continue
+		}
+		networks = append(networks, name)
+	}
+	return networks
+}
+
+// hostPort is the published port on the daemon's host. A daemon with IPv6 enabled publishes one
+// binding per family, and only the IPv4 one is reachable over the loopback address used here.
+func (c *containerInfo) hostPort() string {
+	bindings := c.NetworkSettings.Ports[pgPortKey]
+	for _, b := range bindings {
+		if b.HostPort != "" && !strings.Contains(b.HostIP, ":") {
+			return b.HostPort
+		}
+	}
+	for _, b := range bindings {
+		if b.HostPort != "" {
+			return b.HostPort
+		}
+	}
+	return ""
+}
+
 func docker(ctx context.Context, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -167,18 +266,136 @@ func docker(ctx context.Context, args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// endpoint picks how to reach Postgres. A tcp or ssh DOCKER_HOST publishes the port on that
-// machine. Tests running inside a container that talks to the host's daemon (CI sandboxes,
-// devcontainers) cannot see the host's loopback, but can reach the container's bridge address
-// directly. Everything else is the local loopback and the published port.
-func endpoint(dockerHost string, inContainer bool, containerIP, hostPort string) (host, port string) {
+// reach picks the address this process can use. A tcp or ssh DOCKER_HOST publishes the port on
+// that machine. A test process in a container (CI sandbox, devcontainer) cannot see the host's
+// loopback, where the port is published, so it talks to the sandbox directly over a network the
+// two share. Everything else is the local loopback and the published port.
+func reach(ctx context.Context, dockerHost, name string, sandbox *containerInfo) (host, port string, err error) {
 	if h := publishedHost(dockerHost); h != "" {
-		return h, hostPort
+		return viaPublishedPort(h, sandbox)
 	}
-	if inContainer && containerIP != "" {
-		return containerIP, "5432"
+
+	self := selfContainer(ctx)
+	if self == nil {
+		if ip := sandbox.ip(); inContainer() && ip != "" {
+			return ip, pgPort, nil
+		}
+		return viaPublishedPort("127.0.0.1", sandbox)
 	}
-	return "127.0.0.1", hostPort
+	if self.usesHostNetwork() {
+		return viaPublishedPort("127.0.0.1", sandbox)
+	}
+
+	if ip := sharedIP(self, sandbox); ip != "" {
+		return ip, pgPort, nil
+	}
+
+	ip, err := joinNetwork(ctx, name, self)
+	if err != nil {
+		return "", "", err
+	}
+	return ip, pgPort, nil
+}
+
+func viaPublishedPort(host string, sandbox *containerInfo) (string, string, error) {
+	hostPort := sandbox.hostPort()
+	if hostPort == "" {
+		return "", "", fmt.Errorf("no host binding for %s", pgPortKey)
+	}
+	return host, hostPort, nil
+}
+
+// inContainer reports whether this process runs in a container. Docker writes /.dockerenv,
+// podman writes /run/.containerenv.
+func inContainer() bool {
+	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(marker); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// selfContainer inspects the container this process runs in, or returns nil when it runs on the
+// host or cannot identify itself. The full id is in the paths docker bind-mounts over
+// /etc/hostname and friends; the hostname is the short id unless the container was given one.
+func selfContainer(ctx context.Context) *containerInfo {
+	if !inContainer() {
+		return nil
+	}
+	for _, id := range selfIDs() {
+		if info, err := inspect(ctx, id); err == nil {
+			return info
+		}
+	}
+	return nil
+}
+
+func selfIDs() []string {
+	var ids []string
+	if mountinfo, err := os.ReadFile("/proc/self/mountinfo"); err == nil {
+		ids = containerIDs(string(mountinfo))
+	}
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		ids = append(ids, hostname)
+	}
+	return ids
+}
+
+// containerIDRE matches the id in a bind mount source, both docker's
+// /var/lib/docker/containers/<id>/hostname and podman's overlay-containers/<id>/userdata.
+var containerIDRE = regexp.MustCompile(`containers/([0-9a-f]{64})`)
+
+func containerIDs(mountinfo string) []string {
+	var ids []string
+	for _, match := range containerIDRE.FindAllStringSubmatch(mountinfo, -1) {
+		if !slices.Contains(ids, match[1]) {
+			ids = append(ids, match[1])
+		}
+	}
+	return ids
+}
+
+// sharedIP is the sandbox's address on a network this container is attached to as well, or "".
+func sharedIP(self, sandbox *containerInfo) string {
+	for _, name := range slices.Sorted(maps.Keys(sandbox.NetworkSettings.Networks)) {
+		theirs := sandbox.NetworkSettings.Networks[name]
+		ours, ok := self.NetworkSettings.Networks[name]
+		if ok && ours.NetworkID == theirs.NetworkID && theirs.IPAddress != "" {
+			return theirs.IPAddress
+		}
+	}
+	return ""
+}
+
+// joinNetwork attaches the sandbox to one of this container's networks and returns its address
+// there. Another process in another container may be doing the same, so an endpoint that already
+// exists counts as a success.
+func joinNetwork(ctx context.Context, name string, self *containerInfo) (string, error) {
+	networks := self.attachableNetworks()
+	if len(networks) == 0 {
+		return "", errors.New("this container is on no network that the sandbox can join")
+	}
+
+	var failures []error
+	for _, network := range networks {
+		if _, err := docker(ctx, "network", "connect", network, name); err != nil &&
+			!strings.Contains(err.Error(), "already exists in network") {
+			failures = append(failures, err)
+			continue
+		}
+		info, err := inspect(ctx, name)
+		if err != nil {
+			return "", err
+		}
+		if ip := info.NetworkSettings.Networks[network].IPAddress; ip != "" {
+			return ip, nil
+		}
+	}
+	if len(failures) > 0 {
+		return "", fmt.Errorf("connect %s to %v: %w", name, networks, errors.Join(failures...))
+	}
+	return "", fmt.Errorf("%s got no address on %v", name, networks)
 }
 
 // publishedHost is the remote host named by a tcp or ssh DOCKER_HOST, or "" for a local daemon.
