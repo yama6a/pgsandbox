@@ -2,6 +2,10 @@
 
 A migrated Postgres database per Go test, in one call.
 
+```sh
+go get github.com/yama6a/pgsandbox
+```
+
 ```go
 import "github.com/yama6a/pgsandbox"
 
