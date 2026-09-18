@@ -1,6 +1,6 @@
 // Package pgsandbox hands a Go test its own migrated Postgres database.
 //
-// One Postgres container per major version is started through testcontainers and reused by
+// One Postgres container per major version is started through the docker CLI and reused by
 // every test process and every later run. Inside it, the migrations for a given set are run once
 // into a blueprint database; each test then gets a clone of that blueprint, which is a file copy,
 // and the clone is dropped when the test ends. Tests can run in parallel.

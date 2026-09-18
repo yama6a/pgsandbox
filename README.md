@@ -24,7 +24,9 @@ Tests can run in parallel; each one sees only its own rows.
 
 ## Requirements
 
-- Docker reachable by [testcontainers-go](https://golang.testcontainers.org/)
+- The `docker` CLI on `PATH`, pointed at a daemon that can run Linux containers: Docker Desktop,
+  Colima, Podman with the docker shim, or a remote daemon through `DOCKER_HOST`. The mapped port
+  is reached on `127.0.0.1`, or on the host named by a `tcp://` or `ssh://` `DOCKER_HOST`.
 - Go 1.27
 
 ## API
@@ -54,8 +56,7 @@ default. `New` fails the test on any error.
 - Cloning is `CREATE DATABASE ... TEMPLATE`, a file copy. A Postgres advisory lock makes parallel
   tests with the same migrations wait for one build instead of racing.
 
-The container is meant to outlive the run, so pgsandbox sets `TESTCONTAINERS_RYUK_DISABLED=true`
-in the test process unless that variable is already set. Remove the container yourself:
+The container outlives the run on purpose. Remove it yourself:
 
 ```sh
 docker ps -aq -f name='^pgsandbox-' | xargs docker rm -f    # or: make clean
