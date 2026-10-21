@@ -55,6 +55,13 @@ func TestNewSettings(t *testing.T) {
 		assert.Len(t, withFn.migrators, 1)
 	})
 
+	t.Run("the server option sets the dsn", func(t *testing.T) {
+		t.Parallel()
+		s, err := newSettings(18, Server("postgres://u:p@db.internal:5432/postgres"))
+		require.NoError(t, err)
+		assert.Equal(t, "postgres://u:p@db.internal:5432/postgres", s.dsn)
+	})
+
 	t.Run("keep on failure is off by default", func(t *testing.T) {
 		t.Parallel()
 		s, err := newSettings(18)

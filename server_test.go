@@ -14,10 +14,13 @@ const longID = "c561ce51d0d3801241b9476e875ff503f128f6800b147f94ab985670054c0532
 
 func TestStartServer(t *testing.T) {
 	t.Parallel()
+	if os.Getenv(envDSN) != "" {
+		t.Skip("checks the docker container, and " + envDSN + " replaces it")
+	}
 
-	first, err := startServer(t.Context(), testMajor)
+	first, err := startServer(t.Context(), testMajor, "")
 	require.NoError(t, err)
-	second, err := startServer(t.Context(), testMajor)
+	second, err := startServer(t.Context(), testMajor, "")
 	require.NoError(t, err)
 
 	assert.Same(t, first, second)

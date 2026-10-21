@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,39 +34,58 @@ const (
 var errNoDocker = errors.New("docker not found on PATH")
 
 type server struct {
-	name  string
-	host  string
-	port  string
-	admin *pgxpool.Pool
+	name string
+	base url.URL
+	// suffix ends every database name this process creates. It is empty for the container,
+	// whose blueprints every process shares on purpose.
+	suffix string
+	admin  *pgxpool.Pool
+	// owner holds this process's suffix lock on an external server. The server keeps the
+	// reference so the connection, and with it the lock, lives as long as the process.
+	owner *pgx.Conn
 }
 
-// One server per Postgres major per process. The container itself is named, so other processes
-// and later runs attach to the same one instead of starting their own.
+// serverKey has an empty dsn for the docker container.
+type serverKey struct {
+	major int
+	dsn   string
+}
+
+// One server per key per process. The container itself is named, so other processes and later
+// runs attach to the same one instead of starting their own.
 //
-//nolint:gochecknoglobals // process-wide registry of the shared containers
+//nolint:gochecknoglobals // process-wide registry of the shared servers
 var registry = struct {
 	sync.Mutex
-	byMajor map[int]*server
-	errs    map[int]error
-}{byMajor: map[int]*server{}, errs: map[int]error{}}
+	byKey map[serverKey]*server
+	errs  map[serverKey]error
+}{byKey: map[serverKey]*server{}, errs: map[serverKey]error{}}
 
-func startServer(ctx context.Context, major int) (*server, error) {
+// startServer attaches to the server at dsn, or runs the docker container when dsn is empty.
+func startServer(ctx context.Context, major int, dsn string) (*server, error) {
 	registry.Lock()
 	defer registry.Unlock()
 
-	if s, ok := registry.byMajor[major]; ok {
+	key := serverKey{major: major, dsn: dsn}
+	if s, ok := registry.byKey[key]; ok {
 		return s, nil
 	}
-	if err, ok := registry.errs[major]; ok {
+	if err, ok := registry.errs[key]; ok {
 		return nil, err
 	}
 
-	s, err := launch(ctx, major)
+	var s *server
+	var err error
+	if dsn == "" {
+		s, err = launch(ctx, major)
+	} else {
+		s, err = attach(ctx, major, dsn)
+	}
 	if err != nil {
-		registry.errs[major] = err
+		registry.errs[key] = err
 		return nil, err
 	}
-	registry.byMajor[major] = s
+	registry.byKey[key] = s
 	return s, nil
 }
 
@@ -91,7 +111,15 @@ func launch(ctx context.Context, major int) (*server, error) {
 		return nil, fmt.Errorf("address of %s: %w", name, err)
 	}
 
-	s := &server{name: name, host: host, port: port}
+	s := &server{
+		name: name,
+		base: url.URL{
+			Scheme:   "postgres",
+			User:     url.UserPassword(serverUser, serverPass),
+			Host:     net.JoinHostPort(host, port),
+			RawQuery: "sslmode=disable",
+		},
+	}
 	s.admin, err = waitForPostgres(ctx, s.dsn(adminDB))
 	if err != nil {
 		return nil, fmt.Errorf("%s did not become ready: %w", name, err)
@@ -408,12 +436,12 @@ func publishedHost(dockerHost string) string {
 }
 
 func (s *server) dsn(database string) string {
-	u := url.URL{
-		Scheme:   "postgres",
-		User:     url.UserPassword(serverUser, serverPass),
-		Host:     net.JoinHostPort(s.host, s.port),
-		Path:     "/" + database,
-		RawQuery: "sslmode=disable",
-	}
+	u := s.base
+	u.Path = "/" + database
+	u.RawPath = ""
 	return u.String()
+}
+
+func (s *server) blueprint(cfg *settings) string {
+	return cfg.blueprint() + s.suffix
 }

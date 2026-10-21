@@ -51,7 +51,7 @@ func TestNew(t *testing.T) {
 		t.Run("inner", func(t *testing.T) {
 			name = New(t, testMajor, Migrations(os.DirFS("testdata/migrations"))).Name
 		})
-		srv, err := startServer(t.Context(), testMajor)
+		srv, err := startServer(t.Context(), testMajor, os.Getenv(envDSN))
 		require.NoError(t, err)
 		assert.Equal(t, 0, countDatabases(t.Context(), t, srv, name))
 	})
@@ -114,7 +114,7 @@ func TestKeepOnFailure(t *testing.T) {
 
 	name, err := os.ReadFile(nameFile)
 	require.NoError(t, err)
-	srv, err := startServer(t.Context(), testMajor)
+	srv, err := startServer(t.Context(), testMajor, os.Getenv(envDSN))
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, dropDatabase(context.Background(), srv.admin, string(name))) })
 

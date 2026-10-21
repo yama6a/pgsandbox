@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -35,6 +36,12 @@ func Migrate(key string, fn func(context.Context, *pgx.Conn) error) Option {
 	}
 }
 
+// Server makes New use the Postgres server at dsn instead of a docker container, and overrides
+// PGSANDBOX_DSN. The dsn is a postgres:// URL whose role may create databases.
+func Server(dsn string) Option {
+	return func(s *settings) { s.dsn = dsn }
+}
+
 // KeepOnFailure leaves the database in place when the test fails and logs its DSN, so it can be
 // inspected with psql. Drop it by hand, or remove the container with `make clean`.
 func KeepOnFailure() Option {
@@ -48,6 +55,7 @@ type migrator struct {
 
 type settings struct {
 	major     int
+	dsn       string
 	scripts   []script
 	migrators []migrator
 	keep      bool
@@ -58,7 +66,7 @@ func newSettings(major int, opts ...Option) (*settings, error) {
 	if major <= 0 {
 		return nil, fmt.Errorf("%w, got %d", errBadMajor, major)
 	}
-	s := &settings{major: major}
+	s := &settings{major: major, dsn: os.Getenv(envDSN)}
 	for _, opt := range opts {
 		opt(s)
 	}

@@ -17,10 +17,11 @@ const sqlstateUnknownDatabase = "3D000"
 
 // cloneFromBlueprint returns a fresh database holding the migrated schema. The blueprint for the
 // settings' fingerprint is built by the first caller, under a server-side lock so parallel
-// callers wait instead of racing to build it. Later callers, in this process or any other, clone.
+// callers wait instead of racing to build it. Later callers clone it, from any process that
+// names its blueprints the same way.
 func cloneFromBlueprint(ctx context.Context, srv *server, cfg *settings) (string, error) {
-	blueprint := cfg.blueprint()
-	clone := "sb_" + randomSuffix()
+	blueprint := srv.blueprint(cfg)
+	clone := "sb_" + randomSuffix() + srv.suffix
 
 	// A session lock, not a transaction lock: CREATE DATABASE cannot run inside a transaction.
 	lock, err := srv.admin.Acquire(ctx)
