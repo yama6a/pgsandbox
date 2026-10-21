@@ -4,6 +4,9 @@
 // every test process and every later run. Inside it, the migrations for a given set are run once
 // into a blueprint database; each test then gets a clone of that blueprint, which is a file copy,
 // and the clone is dropped when the test ends. Tests can run in parallel.
+//
+// PGSANDBOX_DSN, or the Server option, replaces the container with a Postgres server that is
+// already running, for machines without a docker daemon.
 package pgsandbox
 
 import (
@@ -22,7 +25,7 @@ type DB struct {
 	Pool *pgxpool.Pool
 	// DSN is a postgres:// URL for anything that opens its own connection.
 	DSN string
-	// Name is the database name inside the shared container.
+	// Name is the database name on the shared server.
 	Name string
 }
 
@@ -36,11 +39,11 @@ func New(tb testing.TB, major int, opts ...Option) *DB {
 		tb.Fatalf("pgsandbox: %v", err)
 	}
 
-	// Not t.Context: the container and the blueprint outlive this test.
+	// Not t.Context: the server and the blueprint outlive this test.
 	ctx, cancel := context.WithTimeout(context.Background(), setupTimeout)
 	defer cancel()
 
-	srv, err := startServer(ctx, major)
+	srv, err := startServer(ctx, major, cfg.dsn)
 	if err != nil {
 		tb.Fatalf("pgsandbox: %v", err)
 	}
@@ -53,6 +56,9 @@ func New(tb testing.TB, major int, opts ...Option) *DB {
 
 	tb.Cleanup(func() {
 		if cfg.keep && tb.Failed() {
+			if err := markKept(context.Background(), srv.admin, name); err != nil {
+				tb.Logf("pgsandbox: %v", err)
+			}
 			tb.Logf("pgsandbox: kept database %s for inspection: %s", name, dsn)
 			return
 		}

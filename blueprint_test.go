@@ -16,7 +16,7 @@ import (
 func TestCloneFromBlueprint(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	srv, err := startServer(ctx, testMajor)
+	srv, err := startServer(ctx, testMajor, os.Getenv(envDSN))
 	require.NoError(t, err)
 
 	t.Run("parallel callers share one build", func(t *testing.T) {
@@ -49,7 +49,7 @@ func TestCloneFromBlueprint(t *testing.T) {
 
 		assert.Equal(t, int32(1), builds.Load())
 		assert.Len(t, uniq(names), callers)
-		assert.Equal(t, 1, countDatabases(ctx, t, srv, cfg.blueprint()))
+		assert.Equal(t, 1, countDatabases(ctx, t, srv, srv.blueprint(cfg)))
 		for _, name := range names {
 			assert.Equal(t, 3, countColumns(ctx, t, srv, name, "shelves"))
 		}
@@ -70,8 +70,8 @@ func TestCloneFromBlueprint(t *testing.T) {
 		t.Cleanup(func() { assert.NoError(t, dropDatabase(ctx, srv.admin, nb)) })
 
 		assert.NotEqual(t, a.blueprint(), b.blueprint())
-		assert.Equal(t, 1, countDatabases(ctx, t, srv, a.blueprint()))
-		assert.Equal(t, 1, countDatabases(ctx, t, srv, b.blueprint()))
+		assert.Equal(t, 1, countDatabases(ctx, t, srv, srv.blueprint(a)))
+		assert.Equal(t, 1, countDatabases(ctx, t, srv, srv.blueprint(b)))
 	})
 
 	t.Run("a failing migration leaves no blueprint behind", func(t *testing.T) {
@@ -82,14 +82,14 @@ func TestCloneFromBlueprint(t *testing.T) {
 
 		_, err = cloneFromBlueprint(ctx, srv, cfg)
 		require.ErrorIs(t, err, boom)
-		assert.Equal(t, 0, countDatabases(ctx, t, srv, cfg.blueprint()))
+		assert.Equal(t, 0, countDatabases(ctx, t, srv, srv.blueprint(cfg)))
 	})
 }
 
 func TestDropDatabase(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	srv, err := startServer(ctx, testMajor)
+	srv, err := startServer(ctx, testMajor, os.Getenv(envDSN))
 	require.NoError(t, err)
 	cfg, err := newSettings(testMajor, Migrations(os.DirFS("testdata/migrations")))
 	require.NoError(t, err)
