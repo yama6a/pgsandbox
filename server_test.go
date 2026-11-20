@@ -2,6 +2,7 @@ package pgsandbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"testing"
@@ -24,7 +25,7 @@ func TestStartServer(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Same(t, first, second)
-	assert.Equal(t, "pgsandbox-18", first.name)
+	assert.Equal(t, fmt.Sprintf("pgsandbox-%d", testMajor), first.name)
 
 	var one int
 	require.NoError(t, first.admin.QueryRow(t.Context(), "select 1").Scan(&one))
@@ -42,7 +43,7 @@ func TestStartServer(t *testing.T) {
 	out, err := exec.CommandContext(t.Context(), "docker", "inspect", first.name,
 		"--format", "{{.State.Running}} {{.Config.Image}} {{index .HostConfig.Tmpfs \"/var/lib/postgresql\"}}").Output()
 	require.NoError(t, err)
-	assert.Equal(t, "true postgres:18-alpine rw\n", string(out))
+	assert.Equal(t, fmt.Sprintf("true postgres:%d-alpine rw\n", testMajor), string(out))
 }
 
 func TestReachRemoteDaemon(t *testing.T) {
@@ -61,7 +62,7 @@ func TestReachRemoteDaemon(t *testing.T) {
 			var sandbox containerInfo
 			require.NoError(t, json.Unmarshal([]byte(`{"NetworkSettings":{"Ports":{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"32773"}]}}}`), &sandbox))
 
-			host, port, err := reach(t.Context(), tc.dockerHost, "pgsandbox-18", &sandbox)
+			host, port, err := reach(t.Context(), tc.dockerHost, fmt.Sprintf("pgsandbox-%d", testMajor), &sandbox)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantHost, host)
 			assert.Equal(t, "32773", port)
@@ -81,7 +82,7 @@ func TestReachLocalDaemon(t *testing.T) {
 			var sandbox containerInfo
 			require.NoError(t, json.Unmarshal([]byte(`{"NetworkSettings":{"Ports":{"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"32773"}]}}}`), &sandbox))
 
-			host, port, err := reach(t.Context(), dockerHost, "pgsandbox-18", &sandbox)
+			host, port, err := reach(t.Context(), dockerHost, fmt.Sprintf("pgsandbox-%d", testMajor), &sandbox)
 			require.NoError(t, err)
 			assert.Equal(t, "127.0.0.1", host)
 			assert.Equal(t, "32773", port)
