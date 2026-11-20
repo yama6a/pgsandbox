@@ -11,14 +11,14 @@ import "github.com/yama6a/pgsandbox"
 
 func TestOrders(t *testing.T) {
     t.Parallel()
-    db := pgsandbox.New(t, 18, pgsandbox.Migrations(os.DirFS("../../migrations")))
+    db := pgsandbox.New(t, 19, pgsandbox.Migrations(os.DirFS("../../migrations")))
 
     _, err := db.Pool.Exec(t.Context(), "insert into orders (id) values (1)")
     // ...
 }
 ```
 
-`New` starts Postgres 18 in Docker the first time it runs, migrates a blueprint database once for
+`New` starts Postgres 19 in Docker the first time it runs, migrates a blueprint database once for
 that migration set, clones the blueprint for this test, and drops the clone when the test ends.
 Tests can run in parallel; each one sees only its own rows.
 

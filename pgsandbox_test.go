@@ -18,7 +18,7 @@ import (
 )
 
 // Renovate tracks this pin; the number is the only place the version is written.
-const testMajor = 18
+const testMajor = 19
 
 func TestNew(t *testing.T) {
 	t.Parallel()
